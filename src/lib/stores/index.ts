@@ -3,6 +3,7 @@ import { type Writable, writable } from 'svelte/store';
 import type { GlobalModelConfig, ModelConfig } from '$lib/apis';
 import type { Banner } from '$lib/types';
 import type { Socket } from 'socket.io-client';
+import type { AppDocuments } from '$lib/types/document.types';
 
 // Backend
 export const WEBUI_NAME = writable(APP_NAME);
@@ -27,7 +28,7 @@ export const tags = writable([]);
 
 export const models: Writable<Model[]> = writable([]);
 export const prompts: Writable<Prompt[]> = writable([]);
-export const documents: Writable<Document[]> = writable([]);
+export const documents: Writable<AppDocuments> = writable([]);
 
 export const tools = writable([]);
 export const functions = writable([]);
@@ -147,13 +148,6 @@ type Prompt = {
 	title: string;
 	content: string;
 	timestamp: number;
-};
-
-type Document = {
-	collection_name: string;
-	filename: string;
-	name: string;
-	title: string;
 };
 
 type Config = {

@@ -1,9 +1,17 @@
-<script>
+<script lang="ts">
 	import { io } from 'socket.io-client';
 	import { spring } from 'svelte/motion';
 
 	let loadingProgress = spring(0, {
 		stiffness: 0.05
+	});
+
+	import 'nprogress/nprogress.css';
+	import NProgress from 'nprogress';
+
+	NProgress.configure({
+		// Full list: https://github.com/rstacruz/nprogress#configuration
+		minimum: 0.16
 	});
 
 	import { onMount, tick, setContext } from 'svelte';
@@ -15,10 +23,21 @@
 		mobile,
 		socket,
 		activeUserCount,
-		USAGE_POOL
+		USAGE_POOL,
 	} from '$lib/stores';
 	import { goto } from '$app/navigation';
-	import { page } from '$app/stores';
+	import { page, navigating } from '$app/stores';
+
+	$: {
+		if ($navigating) {
+			NProgress.start();
+			loadingProgress.set(50);  // Sync with your custom progress bar
+		} else {
+			NProgress.done();
+			loadingProgress.set(100); // Complete the spring progress bar
+		}
+	}
+
 	import { Toaster, toast } from 'svelte-sonner';
 
 	import { getBackendConfig } from '$lib/apis';

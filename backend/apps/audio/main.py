@@ -3,6 +3,8 @@ import json
 import logging
 import os
 import uuid
+import time
+
 from functools import lru_cache
 from pathlib import Path
 
@@ -29,6 +31,8 @@ from config import (
     DEVICE_TYPE,
     AUDIO_STT_OPENAI_API_BASE_URL,
     AUDIO_STT_OPENAI_API_KEY,
+    AUDIO_STT_GROQAI_API_BASE_URL,
+    AUDIO_STT_GROQAI_API_KEY,
     AUDIO_TTS_OPENAI_API_BASE_URL,
     AUDIO_TTS_OPENAI_API_KEY,
     AUDIO_TTS_API_KEY,
@@ -41,12 +45,17 @@ from config import (
     AppConfig,
     CORS_ALLOW_ORIGIN,
 )
+
 from constants import ERROR_MESSAGES
+from utils.compress_audio import compress_audio
 from utils.utils import (
     get_current_user,
     get_verified_user,
     get_admin_user,
 )
+
+from pydub import AudioSegment
+from pydub.utils import mediainfo
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["AUDIO"])
@@ -64,6 +73,8 @@ app.state.config = AppConfig()
 
 app.state.config.STT_OPENAI_API_BASE_URL = AUDIO_STT_OPENAI_API_BASE_URL
 app.state.config.STT_OPENAI_API_KEY = AUDIO_STT_OPENAI_API_KEY
+app.state.config.STT_GROQAI_API_BASE_URL = AUDIO_STT_GROQAI_API_BASE_URL
+app.state.config.STT_GROQAI_API_KEY = AUDIO_STT_GROQAI_API_KEY
 app.state.config.STT_ENGINE = AUDIO_STT_ENGINE
 app.state.config.STT_MODEL = AUDIO_STT_MODEL
 
@@ -82,6 +93,8 @@ log.info(f"whisper_device_type: {whisper_device_type}")
 SPEECH_CACHE_DIR = Path(CACHE_DIR).joinpath("./audio/speech/")
 SPEECH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+MAX_FILE_SIZE_MB = 25  # Maximum file size in megabytes
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024  # Convert to bytes
 
 class TTSConfigForm(BaseModel):
     OPENAI_API_BASE_URL: str
@@ -94,6 +107,8 @@ class TTSConfigForm(BaseModel):
 
 
 class STTConfigForm(BaseModel):
+    GROQAI_API_BASE_URL: str
+    GROQAI_API_KEY: str
     OPENAI_API_BASE_URL: str
     OPENAI_API_KEY: str
     ENGINE: str
@@ -103,10 +118,6 @@ class STTConfigForm(BaseModel):
 class AudioConfigUpdateForm(BaseModel):
     tts: TTSConfigForm
     stt: STTConfigForm
-
-
-from pydub import AudioSegment
-from pydub.utils import mediainfo
 
 
 def is_mp4_audio(file_path):
@@ -147,6 +158,8 @@ async def get_audio_config(user=Depends(get_admin_user)):
         "stt": {
             "OPENAI_API_BASE_URL": app.state.config.STT_OPENAI_API_BASE_URL,
             "OPENAI_API_KEY": app.state.config.STT_OPENAI_API_KEY,
+            "GROQAI_API_BASE_URL": app.state.config.STT_GROQAI_API_BASE_URL,
+            "GROQAI_API_KEY": app.state.config.STT_GROQAI_API_KEY,
             "ENGINE": app.state.config.STT_ENGINE,
             "MODEL": app.state.config.STT_MODEL,
         },
@@ -167,6 +180,8 @@ async def update_audio_config(
 
     app.state.config.STT_OPENAI_API_BASE_URL = form_data.stt.OPENAI_API_BASE_URL
     app.state.config.STT_OPENAI_API_KEY = form_data.stt.OPENAI_API_KEY
+    app.state.config.STT_GROQAI_API_BASE_URL = form_data.stt.GROQAI_API_BASE_URL
+    app.state.config.STT_GROQAI_API_KEY = form_data.stt.GROQAI_API_KEY
     app.state.config.STT_ENGINE = form_data.stt.ENGINE
     app.state.config.STT_MODEL = form_data.stt.MODEL
 
@@ -183,6 +198,8 @@ async def update_audio_config(
         "stt": {
             "OPENAI_API_BASE_URL": app.state.config.STT_OPENAI_API_BASE_URL,
             "OPENAI_API_KEY": app.state.config.STT_OPENAI_API_KEY,
+            "GROQAI_API_BASE_URL": app.state.config.STT_GROQAI_API_BASE_URL,
+            "GROQAI_API_KEY": app.state.config.STT_GROQAI_API_KEY,
             "ENGINE": app.state.config.STT_ENGINE,
             "MODEL": app.state.config.STT_MODEL,
         },
@@ -315,12 +332,158 @@ async def speech(request: Request, user=Depends(get_verified_user)):
             )
 
 
+def handle_default_stt(file_path: str, file_dir: str, id: uuid.UUID) -> dict:
+    from faster_whisper import WhisperModel
+
+    whisper_kwargs = {
+        "model_size_or_path": WHISPER_MODEL,
+        "device": whisper_device_type,
+        "compute_type": "int8",
+        "download_root": WHISPER_MODEL_DIR,
+        "local_files_only": not WHISPER_MODEL_AUTO_UPDATE,
+    }
+
+    log.debug(f"whisper_kwargs: {whisper_kwargs}")
+
+    try:
+        model = WhisperModel(**whisper_kwargs)
+    except Exception:
+        log.warning(
+            "WhisperModel initialization failed, attempting download with local_files_only=False"
+        )
+        whisper_kwargs["local_files_only"] = False
+        model = WhisperModel(**whisper_kwargs)
+
+    segments, info = model.transcribe(file_path, beam_size=5)
+    log.info(
+        "Detected language '%s' with probability %f"
+        % (info.language, info.language_probability)
+    )
+
+    transcript = "".join([segment.text for segment in list(segments)])
+
+    data = {"text": transcript.strip()}
+
+    # Save the transcript to a JSON file
+    transcript_file = f"{file_dir}/{id}.json"
+    with open(transcript_file, "w") as f:
+        json.dump(data, f)
+
+    return data
+
+
+def handle_openai_stt(file_path: str, file_dir: str, filename: str, id: uuid.UUID) -> dict:
+    if is_mp4_audio(file_path):
+        os.rename(file_path, file_path.replace(".wav", ".mp4"))
+        # Convert MP4 audio file to WAV format
+        convert_mp4_to_wav(file_path.replace(".wav", ".mp4"), file_path)
+
+    headers = {"Authorization": f"Bearer {app.state.config.STT_OPENAI_API_KEY}"}
+
+    files = {"file": (filename, open(file_path, "rb"))}
+    data = {"model": app.state.config.STT_MODEL}
+
+    r = None
+    try:
+        r = requests.post(
+            url=f"{app.state.config.STT_OPENAI_API_BASE_URL}/audio/transcriptions",
+            headers=headers,
+            files=files,
+            data=data,
+        )
+
+        r.raise_for_status()
+
+        data = r.json()
+
+        # Save the transcript to a JSON file
+        transcript_file = f"{file_dir}/{id}.json"
+        with open(transcript_file, "w") as f:
+            json.dump(data, f)
+
+        return data
+    except Exception as e:
+        log.exception(e)
+        error_detail = "Open WebUI: Server Connection Error"
+        if r is not None:
+            try:
+                res = r.json()
+                if "error" in res:
+                    error_detail = f"External: {res['error']['message']}"
+            except Exception:
+                error_detail = f"External: {e}"
+
+        raise HTTPException(
+            status_code=r.status_code if r is not None else 500,
+            detail=error_detail,
+        )
+
+
+def handle_groqai_stt(file_path: str, file_dir: str, filename: str, id: uuid.UUID) -> dict:
+    """
+    Groqai API has a limit of 7200 seconds of audio per hour
+    """
+    groqai_start_time = time.time()
+    if is_mp4_audio(file_path):
+        os.rename(file_path, file_path.replace(".wav", ".mp4"))
+        # Convert MP4 audio file to WAV format
+        convert_mp4_to_wav(file_path.replace(".wav", ".mp4"), file_path)
+        filename = os.path.basename(file_path)  # Update filename after conversion
+
+    headers = {"Authorization": f"Bearer {app.state.config.STT_GROQAI_API_KEY}"}
+
+    files = {"file": (filename, open(file_path, "rb"))}
+    data = {
+        "model": app.state.config.STT_MODEL,
+        "response_format": "json",
+        "language": "en",
+    }
+
+    r = None
+    try:
+        r = requests.post(
+            url=f"{app.state.config.STT_GROQAI_API_BASE_URL}/audio/transcriptions",
+            headers=headers,
+            files=files,
+            data=data,
+        )
+
+        r.raise_for_status()
+
+        data = r.json()
+
+        # Save the transcript to a JSON file
+        transcript_file = f"{file_dir}/{id}.json"
+        with open(transcript_file, "w") as f:
+            json.dump(data, f)
+
+        log.info(f"GroqAI transcription took: {time.time() - groqai_start_time} seconds")
+        return data
+    except Exception as e:
+        log.exception(e)
+        error_detail = "Open WebUI: Server Connection Error"
+        if r is not None:
+            try:
+                res = r.json()
+                if "error" in res:
+                    error_detail = f"External: {res['error']['message']}"
+            except Exception:
+                error_detail = f"External: {e}"
+
+        raise HTTPException(
+            status_code=r.status_code if r is not None else 500,
+            detail=error_detail,
+        )
+
+
 @app.post("/transcriptions")
 def transcribe(
     file: UploadFile = File(...),
     user=Depends(get_current_user),
 ):
+    start_time = time.time()
     log.info(f"file.content_type: {file.content_type}")
+    log.info(f"app.stt_engine: {app.state.config.STT_ENGINE}")
 
     if file.content_type not in ["audio/mpeg", "audio/wav"]:
         raise HTTPException(
@@ -328,6 +491,8 @@ def transcribe(
             detail=ERROR_MESSAGES.FILE_NOT_SUPPORTED,
         )
 
+    # Timing for file saving
+    save_start_time = time.time()
     try:
         ext = file.filename.split(".")[-1]
 
@@ -345,97 +510,44 @@ def transcribe(
             f.write(contents)
             f.close()
 
-        if app.state.config.STT_ENGINE == "":
-            from faster_whisper import WhisperModel
+         # Log time taken for file saving
+        log.info(f"File saving took: {time.time() - save_start_time} seconds")
 
-            whisper_kwargs = {
-                "model_size_or_path": WHISPER_MODEL,
-                "device": whisper_device_type,
-                "compute_type": "int8",
-                "download_root": WHISPER_MODEL_DIR,
-                "local_files_only": not WHISPER_MODEL_AUTO_UPDATE,
-            }
+        # Compress the audio if its size exceeds the 25MB limit
+        file_size = len(contents)
+        print(f"File size before {file_size}")
+        if file_size > MAX_FILE_SIZE_BYTES:
+            compressed_file_path, filename = compress_audio(file_path, MAX_FILE_SIZE_BYTES)
+            if compressed_file_path != file_path:
+                file_path = compressed_file_path
+                file_size = os.path.getsize(file_path)
+                print(f"File compressed. New size: {file_size}")
+            else:
+                print("Compression not needed or unsuccessful")
 
-            log.debug(f"whisper_kwargs: {whisper_kwargs}")
-
-            try:
-                model = WhisperModel(**whisper_kwargs)
-            except Exception:
-                log.warning(
-                    "WhisperModel initialization failed, attempting download with local_files_only=False"
-                )
-                whisper_kwargs["local_files_only"] = False
-                model = WhisperModel(**whisper_kwargs)
-
-            segments, info = model.transcribe(file_path, beam_size=5)
-            log.info(
-                "Detected language '%s' with probability %f"
-                % (info.language, info.language_probability)
+        # Check the file size again after compression
+        print(f"Final file size: {file_size}")
+        if file_size > MAX_FILE_SIZE_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=ERROR_MESSAGES.FILE_SIZE_EXCEEDS_LIMIT(MAX_FILE_SIZE_BYTES),
             )
 
-            transcript = "".join([segment.text for segment in list(segments)])
-
-            data = {"text": transcript.strip()}
-
-            # save the transcript to a json file
-            transcript_file = f"{file_dir}/{id}.json"
-            with open(transcript_file, "w") as f:
-                json.dump(data, f)
-
-            print(data)
-
-            return data
-
+        # Handle transcription based on the STT engine configured
+        if app.state.config.STT_ENGINE == "":
+            data = handle_default_stt(file_path, file_dir, id)
         elif app.state.config.STT_ENGINE == "openai":
-            if is_mp4_audio(file_path):
-                print("is_mp4_audio")
-                os.rename(file_path, file_path.replace(".wav", ".mp4"))
-                # Convert MP4 audio file to WAV format
-                convert_mp4_to_wav(file_path.replace(".wav", ".mp4"), file_path)
+            data = handle_openai_stt(file_path, file_dir, filename, id)
+        elif app.state.config.STT_ENGINE == "groqai":
+            data = handle_groqai_stt(file_path, file_dir, filename, id)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Unsupported STT engine.",
+            )
 
-            headers = {"Authorization": f"Bearer {app.state.config.STT_OPENAI_API_KEY}"}
-
-            files = {"file": (filename, open(file_path, "rb"))}
-            data = {"model": app.state.config.STT_MODEL}
-
-            print(files, data)
-
-            r = None
-            try:
-                r = requests.post(
-                    url=f"{app.state.config.STT_OPENAI_API_BASE_URL}/audio/transcriptions",
-                    headers=headers,
-                    files=files,
-                    data=data,
-                )
-
-                r.raise_for_status()
-
-                data = r.json()
-
-                # save the transcript to a json file
-                transcript_file = f"{file_dir}/{id}.json"
-                with open(transcript_file, "w") as f:
-                    json.dump(data, f)
-
-                print(data)
-                return data
-            except Exception as e:
-                log.exception(e)
-                error_detail = "Open WebUI: Server Connection Error"
-                if r is not None:
-                    try:
-                        res = r.json()
-                        if "error" in res:
-                            error_detail = f"External: {res['error']['message']}"
-                    except Exception:
-                        error_detail = f"External: {e}"
-
-                raise HTTPException(
-                    status_code=r.status_code if r != None else 500,
-                    detail=error_detail,
-                )
-
+        log.info(f"Total time taken: {time.time() - start_time} seconds")
+        return data
     except Exception as e:
         log.exception(e)
 

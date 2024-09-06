@@ -35,7 +35,10 @@ import uuid
 import os, shutil, logging, re
 
 
-from config import SRC_LOG_LEVELS, UPLOAD_DIR
+from config import (
+    SRC_LOG_LEVELS,
+    UPLOAD_DIR,
+)
 
 
 log = logging.getLogger(__name__)

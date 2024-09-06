@@ -1,40 +1,26 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
-	import dayjs from 'dayjs';
 	import { onMount, getContext } from 'svelte';
-
-	import { createNewDoc, getDocs, tagDocByName, updateDocByName } from '$lib/apis/documents';
+	import { getDocs } from '$lib/apis/documents';
 	import Modal from '../common/Modal.svelte';
 	import { documents } from '$lib/stores';
-	import TagInput from '../common/Tags/TagInput.svelte';
 	import Tags from '../common/Tags.svelte';
-	import { addTagById } from '$lib/apis/chats';
-	import { uploadDocToVectorDB } from '$lib/apis/rag';
-	import { transformFileName } from '$lib/utils';
-	import { SUPPORTED_FILE_EXTENSIONS, SUPPORTED_FILE_TYPE } from '$lib/constants';
+	import { isValidFileType } from '$lib/utils/documents';
+	import type { AppDocumentTags } from '$lib/types/document.types';
 
 	const i18n = getContext('i18n');
 
 	export let show = false;
 	export let uploadDoc: Function;
 	let uploadDocInputElement: HTMLInputElement;
-	let inputFiles;
-	let tags = [];
-
-	let doc = {
-		name: '',
-		title: '',
-		content: null
-	};
+	let inputFiles: File[] | null;
+	let tags: AppDocumentTags = [];
 
 	const submitHandler = async () => {
 		if (inputFiles && inputFiles.length > 0) {
 			for (const file of inputFiles) {
 				console.log(file, file.name.split('.').at(-1));
-				if (
-					SUPPORTED_FILE_TYPE.includes(file['type']) ||
-					SUPPORTED_FILE_EXTENSIONS.includes(file.name.split('.').at(-1))
-				) {
+				if (isValidFileType(file)) {
 					uploadDoc(file, tags);
 				} else {
 					toast.error(
@@ -47,14 +33,14 @@
 			inputFiles = null;
 			uploadDocInputElement.value = '';
 		} else {
-			toast.error($i18n.t(`File not found.`));
+			toast.warning($i18n.t(`File not found.`));
 		}
 
 		show = false;
 		documents.set(await getDocs(localStorage.token));
 	};
 
-	const addTagHandler = async (tagName) => {
+	const addTagHandler = async (tagName: string) => {
 		if (!tags.find((tag) => tag.name === tagName) && tagName !== '') {
 			tags = [...tags, { name: tagName }];
 		} else {
@@ -62,7 +48,7 @@
 		}
 	};
 
-	const deleteTagHandler = async (tagName) => {
+	const deleteTagHandler = async (tagName: string) => {
 		tags = tags.filter((tag) => tag.name !== tagName);
 	};
 

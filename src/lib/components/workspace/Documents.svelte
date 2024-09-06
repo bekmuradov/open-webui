@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { toast } from 'svelte-sonner';
 	import fileSaver from 'file-saver';
-	const { saveAs } = fileSaver;
 
 	import { onMount, getContext } from 'svelte';
 	import { WEBUI_NAME, documents, showSidebar } from '$lib/stores';
@@ -18,31 +17,43 @@
 	import AddDocModal from '$lib/components/documents/AddDocModal.svelte';
 	import { transcribeAudio } from '$lib/apis/audio';
 	import { uploadFile } from '$lib/apis/files';
+	import { isAudioFile, isMoreThan25Mb } from '$lib/utils/documents';
+	import type { AppDocumentTags, AppDocuments, AppDocument } from '$lib/types/document.types';
+
+	import 'nprogress/nprogress.css';
+	import NProgress from 'nprogress';
+
+	NProgress.configure({
+		// Full list: https://github.com/rstacruz/nprogress#configuration
+		minimum: 0.16
+	});
+
+	const { saveAs } = fileSaver;
 
 	const i18n = getContext('i18n');
 
-	let importFiles = '';
+	let importFiles: FileList;
 
 	let inputFiles = '';
 
 	let query = '';
 	let documentsImportInputElement: HTMLInputElement;
-	let tags = [];
+	let tags: string[] = [];
 
 	let showSettingsModal = false;
 	let showAddDocModal = false;
 	let showEditDocModal = false;
-	let selectedDoc;
+	let selectedDoc: AppDocument;
 	let selectedTag = '';
-
+	let loading = false;
 	let dragged = false;
 
-	const deleteDoc = async (name) => {
+	const deleteDoc = async (name: string) => {
 		await deleteDocByName(localStorage.token, name);
 		await documents.set(await getDocs(localStorage.token));
 	};
 
-	const deleteDocs = async (docs) => {
+	const deleteDocs = async (docs: AppDocuments) => {
 		const res = await Promise.all(
 			docs.map(async (doc) => {
 				return await deleteDocByName(localStorage.token, doc.name);
@@ -52,57 +63,83 @@
 		await documents.set(await getDocs(localStorage.token));
 	};
 
-	const uploadDoc = async (file, tags?: object) => {
-		console.log(file);
-		// Check if the file is an audio file and transcribe/convert it to text file
-		if (['audio/mpeg', 'audio/wav'].includes(file['type'])) {
-			const transcribeRes = await transcribeAudio(localStorage.token, file).catch((error) => {
-				toast.error(error);
-				return null;
-			});
-
-			if (transcribeRes) {
-				console.log(transcribeRes);
-				const blob = new Blob([transcribeRes.text], { type: 'text/plain' });
-				file = blobToFile(blob, `${file.name}.txt`);
-			}
+	const uploadDoc = async (file: File, tags?: AppDocumentTags) => {
+		if (!file) {
+			return null;
 		}
-
-		// Upload the file to the server
-		const uploadedFile = await uploadFile(localStorage.token, file).catch((error) => {
-			toast.error(error);
-			return null;
-		});
-
-		const res = await processDocToVectorDB(localStorage.token, uploadedFile.id).catch((error) => {
-			toast.error(error);
-			return null;
-		});
-
-		if (res) {
-			await createNewDoc(
-				localStorage.token,
-				res.collection_name,
-				res.filename,
-				transformFileName(res.filename),
-				res.filename,
-				tags?.length > 0
-					? {
-							tags: tags
+		loading = true;
+		NProgress.start();
+		toast.loading('Processing...');
+		try {
+			if (isAudioFile(file)) {
+				const isLargeFile = isMoreThan25Mb(file);
+				if (isLargeFile) {
+					toast.warning(
+						`The file ${file.name} is larger than 25MB. We will try to compress it, but this process might take 2-3 minutes. Please wait...`,
+						{
+							duration: 8000,
 						}
-					: null
-			).catch((error) => {
+					);
+				}
+				// transcribe/convert it to text file
+				const transcribeRes = await transcribeAudio(localStorage.token, file).catch((error) => {
+					toast.error(error);
+					return null;
+				});
+
+				if (transcribeRes) {
+					const blob = new Blob([transcribeRes.text], { type: 'text/plain' });
+					file = blobToFile(blob, `${file.name}.txt`);
+				}
+			}
+
+			// Upload the file to the server
+			const uploadedFile = await uploadFile(localStorage.token, file).catch((error) => {
 				toast.error(error);
 				return null;
 			});
-			await documents.set(await getDocs(localStorage.token));
+
+			const res = await processDocToVectorDB(localStorage.token, uploadedFile.id).catch((error) => {
+				toast.error(error);
+				return null;
+			});
+
+			if (res) {
+				await createNewDoc(
+					localStorage.token,
+					res.collection_name,
+					res.filename,
+					transformFileName(res.filename),
+					res.filename,
+					(tags && tags.length > 0)
+						? {
+								tags: tags
+							}
+						: null
+				).catch((error) => {
+					toast.error(error);
+					return null;
+				});
+				await documents.set(await getDocs(localStorage.token));
+			}
+			toast.success(
+				`The file ${file.name} is uploaded successfully!`,
+				{
+					duration: 3000,
+				},
+			);
+		} catch (error) {
+			toast.error('Upload failed.');
+		} finally {
+			NProgress.done();
+			loading = false;
 		}
 	};
 
 	onMount(() => {
-		documents.subscribe((docs) => {
-			tags = docs.reduce((a, e, i, arr) => {
-				return [...new Set([...a, ...(e?.content?.tags ?? []).map((tag) => tag.name)])];
+		documents.subscribe((docs: AppDocuments) => {
+			tags = docs.reduce<string[]>((acc, doc) => {
+				return [...new Set([...acc, ...(doc?.content?.tags ?? []).map((tag) => tag.name)])];
 			}, []);
 		});
 		const dropZone = document.querySelector('body');
@@ -168,7 +205,7 @@
 		};
 	});
 
-	let filteredDocs;
+	let filteredDocs: AppDocuments;
 
 	$: filteredDocs = $documents.filter(
 		(doc) =>

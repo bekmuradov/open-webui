@@ -15,6 +15,7 @@
 	import SensitiveInput from '$lib/components/common/SensitiveInput.svelte';
 
 	import { TTS_RESPONSE_SPLIT } from '$lib/types';
+	import type { Stt_Engine_Type } from '$lib/types/audio.types';
 
 	import type { Writable } from 'svelte/store';
 	import type { i18n as i18nType } from 'i18next';
@@ -32,9 +33,11 @@
 	let TTS_VOICE = '';
 	let TTS_SPLIT_ON: TTS_RESPONSE_SPLIT = TTS_RESPONSE_SPLIT.PUNCTUATION;
 
+	let STT_GROQAI_API_BASE_URL = '';
+	let STT_GROQAI_API_KEY = '';
 	let STT_OPENAI_API_BASE_URL = '';
 	let STT_OPENAI_API_KEY = '';
-	let STT_ENGINE = '';
+	let STT_ENGINE: Stt_Engine_Type = 'default';
 	let STT_MODEL = '';
 
 	// eslint-disable-next-line no-undef
@@ -90,6 +93,8 @@
 				SPLIT_ON: TTS_SPLIT_ON
 			},
 			stt: {
+				GROQAI_API_BASE_URL: STT_GROQAI_API_BASE_URL,
+				GROQAI_API_KEY: STT_GROQAI_API_KEY,
 				OPENAI_API_BASE_URL: STT_OPENAI_API_BASE_URL,
 				OPENAI_API_KEY: STT_OPENAI_API_KEY,
 				ENGINE: STT_ENGINE,
@@ -123,6 +128,9 @@
 			STT_OPENAI_API_BASE_URL = res.stt.OPENAI_API_BASE_URL;
 			STT_OPENAI_API_KEY = res.stt.OPENAI_API_KEY;
 
+			STT_GROQAI_API_BASE_URL = res.stt.GROQAI_API_BASE_URL;
+			STT_GROQAI_API_KEY = res.stt.GROQAI_API_KEY;
+
 			STT_ENGINE = res.stt.ENGINE;
 			STT_MODEL = res.stt.MODEL;
 		}
@@ -154,6 +162,7 @@
 						>
 							<option value="">{$i18n.t('Whisper (Local)')}</option>
 							<option value="openai">OpenAI</option>
+							<option value="groqai">GroqAI</option>
 							<option value="web">{$i18n.t('Web API')}</option>
 						</select>
 					</div>
@@ -188,6 +197,40 @@
 
 								<datalist id="model-list">
 									<option value="whisper-1" />
+								</datalist>
+							</div>
+						</div>
+					</div>
+					{:else if STT_ENGINE === "groqai"}
+					<div>
+						<div class="mt-1 flex gap-2 mb-1">
+							<input
+								class="flex-1 w-full rounded-lg py-2 pl-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-none"
+								placeholder={$i18n.t('GroqAI API Base URL')}
+								bind:value={STT_GROQAI_API_BASE_URL}
+								required
+							/>
+
+							<SensitiveInput placeholder={$i18n.t('GroqAI API Key')} bind:value={STT_GROQAI_API_KEY} />
+						</div>
+					</div>
+
+					<hr class=" dark:border-gray-850 my-2" />
+
+					<div>
+						<div class=" mb-1.5 text-sm font-medium">{$i18n.t('GroqAI STT Model')}</div>
+						<div class="flex w-full">
+							<div class="flex-1">
+								<input
+									list="model-list"
+									class="w-full rounded-lg py-2 px-4 text-sm bg-gray-50 dark:text-gray-300 dark:bg-gray-850 outline-none"
+									bind:value={STT_MODEL}
+									placeholder="Select a model"
+								/>
+
+								<datalist id="model-list">
+									<option value="distil-whisper-large-v3-en" />
+									<option value="whisper-large-v3" />
 								</datalist>
 							</div>
 						</div>
